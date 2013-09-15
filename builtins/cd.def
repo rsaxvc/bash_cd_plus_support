@@ -67,6 +67,17 @@ int cdspelling = 0;
 
 int cdable_vars;
 
+struct cd_stack;
+
+struct cd_stack
+	{
+	struct cd_stack * prev;
+	struct cd_stack * next;
+	char path[1];/*variable length string*/
+	};
+
+struct cd_stack * crnt_stack = NULL;
+
 static int eflag;	/* file scope so bindpwd() can see it */
 
 $BUILTIN cd
@@ -99,6 +110,90 @@ Exit Status:
 Returns 0 if the directory is changed, and if $PWD is set successfully when
 -P is used; non-zero otherwise.
 $END
+
+/*destroy current node and all past it*/
+static void stack_trim( struct cd_stack * node )
+{
+struct cd_stack * next_node;
+
+if( !node )return;
+
+if( node->prev )node->prev->next = NULL;
+
+while( node )
+	{
+	next_node = node->next;
+	free( node );
+	node = next_node;
+	}
+}
+
+/*store a new directory on stack, cut off old history if present*/
+static void stack_push( char * newpath )
+{
+struct cd_stack * node;
+
+if( crnt_stack && crnt_stack->next )
+	stack_trim( crnt_stack->next );
+
+if( newpath )
+	{
+	node = malloc( strlen( newpath ) + sizeof( struct cd_stack ) );
+	strcpy( &node->path, newpath );
+
+	if( crnt_stack )
+		crnt_stack->next = node;
+
+	node->prev = crnt_stack;
+	crnt_stack = node;
+	node->next = NULL;
+	}
+}
+
+/*walk stack, don't change it, NULL if off edge*/
+static char * stack_up( void )
+{
+if( crnt_stack && crnt_stack->next )
+	{
+	crnt_stack = crnt_stack->next;
+	return crnt_stack->path;
+	}
+else
+	{
+	return NULL;
+	}
+}
+
+/*walk stack, don't change it, NULL if off edge*/
+static char * stack_down( void )
+{
+if( crnt_stack && crnt_stack->prev )
+	{
+	crnt_stack = crnt_stack->prev;
+	return crnt_stack->path;
+	}
+else
+	{
+	return NULL;
+	}
+}
+
+static void stack_reset()
+{
+stack_trim( crnt_stack );
+crnt_stack = NULL;
+stack_push( get_string_value ("PWD") );
+}
+
+static void stack_init()
+{
+static int done;
+if( !done )
+	{
+	stack_reset();
+	done = 1;
+	}
+}
 
 /* Just set $PWD, don't change OLDPWD.  Used by `pwd -P' in posix mode. */
 static int
@@ -187,7 +282,9 @@ cd_builtin (list)
      WORD_LIST *list;
 {
   char *dirname, *cdpath, *path, *temp;
-  int path_index, no_symlinks, opt, lflag;
+  int path_index, no_symlinks, opt, lflag, stackmod;
+
+  stack_init();
 
 #if defined (RESTRICTED_SHELL)
   if (restricted)
@@ -198,6 +295,7 @@ cd_builtin (list)
 #endif /* RESTRICTED_SHELL */
 
   eflag = 0;
+  stackmod = 0;
   no_symlinks = no_symbolic_links;
   reset_internal_getopt ();
   while ((opt = internal_getopt (list, "LP")) != -1)
@@ -240,11 +338,30 @@ cd_builtin (list)
   else if (list->word->word[0] == '-' && list->word->word[1] == '\0')
     {
       /* This is `cd -', equivalent to `cd $OLDPWD' */
-      dirname = get_string_value ("OLDPWD");
+//      dirname = get_string_value ("OLDPWD");
+      dirname = stack_down();
+      stackmod = 1;
 
       if (dirname == 0)
 	{
 	  builtin_error (_("OLDPWD not set"));
+	  return (EXECUTION_FAILURE);
+	}
+#if 0
+      lflag = interactive ? LCD_PRINTPATH : 0;
+#else
+      lflag = LCD_PRINTPATH;		/* According to SUSv3 */
+#endif
+    }
+  else if (list->word->word[0] == '+' && list->word->word[1] == '\0')
+    {
+      /* This is `cd +', equivalent to `cd $NEWPWD' */
+      dirname = stack_up();
+      stackmod = 1;
+
+      if (dirname == 0)
+	{
+	  builtin_error (_("NEWPWD not set"));
 	  return (EXECUTION_FAILURE);
 	}
 #if 0
@@ -312,6 +429,7 @@ cd_builtin (list)
     {
       if (lflag & LCD_PRINTPATH)
 	printf ("%s\n", dirname);
+      if( !stackmod )stack_push( the_current_working_directory );
       return (bindpwd (no_symlinks));
     }
 
@@ -324,7 +442,8 @@ cd_builtin (list)
       if (temp && change_to_directory (temp, no_symlinks))
 	{
 	  printf ("%s\n", temp);
-	  return (bindpwd (no_symlinks));
+	  if( !stackmod )stack_push( the_current_working_directory );
+      return (bindpwd (no_symlinks));
 	}
     }
 
@@ -337,6 +456,7 @@ cd_builtin (list)
       if (temp && change_to_directory (temp, no_symlinks))
 	{
 	  printf ("%s\n", temp);
+	  if( !stackmod )stack_push( the_current_working_directory );
 	  return (bindpwd (no_symlinks));
 	}
       else
